@@ -1,0 +1,21 @@
+{
+  "name": "clg-scraper",
+  "version": "1.0.0",
+  "description": "",
+  "main": "telegram.js",
+  "scripts": {
+    "start": "node telegram.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "type": "module",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
+
