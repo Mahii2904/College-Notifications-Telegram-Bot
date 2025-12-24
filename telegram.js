@@ -1,231 +1,250 @@
 // telegram.js
+
 import dotenv from "dotenv";
 import TelegramBot from "node-telegram-bot-api";
 import { getNotices } from "./index.js";
 import fs from "fs/promises";
 import path from "path";
+import express from "express";
 
 dotenv.config();
 
+/* -------------------- BASIC SETUP -------------------- */
+
 const token = process.env.TELEGRAM_TOKEN;
 if (!token) {
-  console.error("❌ TELEGRAM_TOKEN is not set in .env");
+  console.error("❌ TELEGRAM_TOKEN is missing");
   process.exit(1);
 }
 
-const SUB_FILE = path.resolve("./subscribers.json");
-// Auto-send interval (ms). Default 1 hour = 3600000
 const AUTO_INTERVAL_MS = process.env.AUTO_INTERVAL_MS
   ? parseInt(process.env.AUTO_INTERVAL_MS, 10)
-  : 3600000;
+  : 3600000; // 1 hour
+
+const SUB_FILE = path.join(process.cwd(), "subscribers.json");
+const LAST_FILE = path.join(process.cwd(), "last_notice.json");
 
 const bot = new TelegramBot(token, { polling: true });
-console.log("✅ Telegram bot is running...");
+console.log("✅ Telegram bot started");
 
-async function readSubscribers() {
+/* -------------------- KEEP ALIVE (FREE RENDER FIX) -------------------- */
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("Telegram bot is alive 🚀");
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Keep-alive server running on port ${PORT}`);
+});
+
+/* -------------------- BOT COMMAND MENU -------------------- */
+
+bot.setMyCommands([
+  { command: "start", description: "Start the bot" },
+  { command: "notices", description: "Get latest notices" },
+  { command: "subscribe", description: "Get auto notifications" },
+  { command: "unsubscribe", description: "Stop auto notifications" },
+  { command: "help", description: "Help info" },
+  { command: "about", description: "About this bot" },
+]).catch(console.error);
+
+/* -------------------- FILE HELPERS -------------------- */
+
+async function readJSON(file, fallback) {
   try {
-    const raw = await fs.readFile(SUB_FILE, "utf8");
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr;
-  } catch (err) {
-    // If file does not exist or invalid, create empty file
-    if (err.code === "ENOENT") {
-      await writeSubscribers([]);
-      return [];
-    } else {
-      console.error("Error reading subscribers file:", err);
-      return [];
-    }
+    const data = await fs.readFile(file, "utf8");
+    return JSON.parse(data);
+  } catch {
+    await fs.writeFile(file, JSON.stringify(fallback, null, 2));
+    return fallback;
   }
 }
 
-async function writeSubscribers(arr) {
-  try {
-    await fs.writeFile(SUB_FILE, JSON.stringify(arr, null, 2), "utf8");
-  } catch (err) {
-    console.error("Error writing subscribers file:", err);
-  }
+async function writeJSON(file, data) {
+  await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
+
+/* -------------------- SUBSCRIBER LOGIC -------------------- */
+
+async function readSubscribers() {
+  return await readJSON(SUB_FILE, []);
 }
 
 async function addSubscriber(chatId) {
   const subs = await readSubscribers();
   if (!subs.includes(chatId)) {
     subs.push(chatId);
-    await writeSubscribers(subs);
+    await writeJSON(SUB_FILE, subs);
     return true;
   }
   return false;
 }
 
 async function removeSubscriber(chatId) {
-  let subs = await readSubscribers();
-  const before = subs.length;
-  subs = subs.filter((c) => c !== chatId);
-  if (subs.length !== before) {
-    await writeSubscribers(subs);
+  const subs = await readSubscribers();
+  const filtered = subs.filter((id) => id !== chatId);
+  if (filtered.length !== subs.length) {
+    await writeJSON(SUB_FILE, filtered);
     return true;
   }
   return false;
 }
 
-async function broadcastNotices(count = 5) {
+/* -------------------- LAST NOTICE TRACKING -------------------- */
+
+async function getLastNotice() {
+  const data = await readJSON(LAST_FILE, { last: "" });
+  return data.last;
+}
+
+async function setLastNotice(value) {
+  await writeJSON(LAST_FILE, { last: value });
+}
+
+/* -------------------- AUTO BROADCAST (ONLY NEW) -------------------- */
+
+async function broadcastNewNotices(count = 5) {
   const subs = await readSubscribers();
-  if (!subs || subs.length === 0) return;
-  let text;
-  try {
-    text = await getNotices(count);
-  } catch (err) {
-    console.error("Error fetching notices for broadcast:", err);
-    // Inform subs about failure
-    for (const chatId of subs) {
-      try {
-        await bot.sendMessage(chatId, "Failed to fetch notices right now. I'll try again later.");
-      } catch (err2) {
-        console.error("Error sending error message to", chatId, err2);
-      }
-    }
+  if (subs.length === 0) return;
+
+  const notices = await getNotices(count);
+  if (!notices || notices.length === 0) return;
+
+  const lastSent = await getLastNotice();
+  const newOnes = [];
+
+  for (const notice of notices) {
+    if (notice.text === lastSent) break;
+    newOnes.push(notice);
+  }
+
+  if (newOnes.length === 0) {
+    console.log("ℹ️ No new notices");
     return;
   }
 
+  // Send oldest → newest
+  newOnes.reverse();
+
+  let message = "";
+  newOnes.forEach((n, i) => {
+    message += `${i + 1}. ${n.text}\n${n.link}\n\n`;
+  });
+
   for (const chatId of subs) {
     try {
-      // chunk message if too large
-      if (text.length <= 4000) {
-        await bot.sendMessage(chatId, text);
-      } else {
-        // split by double newline into smaller parts
-        const parts = text.match(/[\s\S]{1,3500}(?:\n\n|$)/g) || [text];
-        for (const p of parts) {
-          await bot.sendMessage(chatId, p);
-        }
-      }
+      await bot.sendMessage(chatId, message);
     } catch (err) {
-      console.error("Failed to send notices to", chatId, err);
+      console.error("Send failed:", chatId);
     }
   }
+
+  await setLastNotice(notices[0].text);
+  console.log("📢 New notices sent");
 }
 
-/* ---------- Commands ---------- */
+/* -------------------- COMMAND HANDLERS -------------------- */
 
 // /start
 bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
   bot.sendMessage(
-    chatId,
+    msg.chat.id,
     `Hi ${msg.from.first_name || ""} 👋
-I fetch the latest college notifications.
+I send college notices automatically.
 
 Commands:
-/notices or /latest [n] - fetch latest n notices (default 5, max 10)
-/subscribe - receive hourly automatic notifications
-/unsubscribe - stop automatic notifications
-/help - show help
-/about - about this bot`
+/notices [n] - latest notices
+/subscribe - auto updates
+/unsubscribe - stop updates
+/help - help info`
   );
 });
 
 // /help
 bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
   bot.sendMessage(
-    chatId,
-    `Help:
-/notices [n] or /latest [n] - Get latest n notices (default 5)
-/subscribe - subscribe to hourly automated notices
-/unsubscribe - unsubscribe from automated notices
-/help - show this help
-/about - info about this bot`
+    msg.chat.id,
+    `/notices [n] - Get latest notices
+/subscribe - Get auto updates
+/unsubscribe - Stop auto updates`
   );
 });
 
 // /about
 bot.onText(/\/about/, (msg) => {
-  const chatId = msg.chat.id;
   bot.sendMessage(
-    chatId,
-    `College Notices Bot
-- Scrapes the college site and sends formatted notices.
-- Auto-send interval: ${AUTO_INTERVAL_MS / 60000} minutes.
-- Subscribe with /subscribe to receive hourly updates.`
+    msg.chat.id,
+    `📢 College Notices Bot
+
+This bot automatically fetches the latest notices from the official college website and delivers them directly on Telegram.
+
+✨ Features:
+• Instant notice fetch on demand
+• Automatic updates at regular intervals
+• Sends only NEW notices 
+• Lightweight and reliable
+`
   );
 });
 
 // /notices or /latest
 bot.onText(/\/(?:notices|latest)(?:\s+(\d+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const count = Math.min(10, Math.max(1, parseInt(match[1], 10) || 5));
-  await bot.sendMessage(chatId, `Fetching latest ${count} notices… ⏳`);
+  const count = Math.min(10, Math.max(1, parseInt(match?.[1]) || 5));
+
+  await bot.sendMessage(chatId, "Fetching notices… ⏳");
+
   try {
-    const text = await getNotices(count);
-    if (text.length <= 4000) {
-      await bot.sendMessage(chatId, text);
-    } else {
-      const parts = text.match(/[\s\S]{1,3500}(?:\n\n|$)/g) || [text];
-      for (const p of parts) await bot.sendMessage(chatId, p);
-    }
-  } catch (err) {
-    console.error("Error in /notices handler:", err);
-    await bot.sendMessage(chatId, "Something went wrong while fetching notices. Try again later.");
+    const notices = await getNotices(count);
+    let text = "";
+    notices.forEach((n, i) => {
+      text += `${i + 1}. ${n.text}\n${n.link}\n\n`;
+    });
+    await bot.sendMessage(chatId, text);
+  } catch {
+    await bot.sendMessage(chatId, "❌ Failed to fetch notices");
   }
 });
 
 // /subscribe
 bot.onText(/\/subscribe/, async (msg) => {
   const chatId = msg.chat.id;
-  try {
-    const added = await addSubscriber(chatId);
-    if (added) {
-      await bot.sendMessage(chatId, "✅ Subscribed to hourly notices. You'll get the next update within an hour.");
-      // Optionally send immediate notice on subscribe:
-      try {
-        const text = await getNotices(5);
-        await bot.sendMessage(chatId, text);
-      } catch (err) {
-        console.error("Error sending immediate notice on subscribe:", err);
-      }
-    } else {
-      await bot.sendMessage(chatId, "You're already subscribed. ✅");
-    }
-  } catch (err) {
-    console.error("Error in /subscribe:", err);
-    await bot.sendMessage(chatId, "Failed to subscribe. Try again later.");
+  const added = await addSubscriber(chatId);
+
+  if (added) {
+    await bot.sendMessage(chatId, "✅ Subscribed to auto notices");
+    try {
+      const notices = await getNotices(5);
+      let text = "";
+      notices.forEach((n, i) => {
+        text += `${i + 1}. ${n.text}\n${n.link}\n\n`;
+      });
+      await bot.sendMessage(chatId, text);
+    } catch {}
+  } else {
+    await bot.sendMessage(chatId, "You are already subscribed 👍");
   }
 });
 
 // /unsubscribe
 bot.onText(/\/unsubscribe/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    const removed = await removeSubscriber(chatId);
-    if (removed) {
-      await bot.sendMessage(chatId, "✅ You have been unsubscribed from hourly notices.");
-    } else {
-      await bot.sendMessage(chatId, "You were not subscribed.");
-    }
-  } catch (err) {
-    console.error("Error in /unsubscribe:", err);
-    await bot.sendMessage(chatId, "Failed to unsubscribe. Try again later.");
-  }
+  const removed = await removeSubscriber(msg.chat.id);
+  await bot.sendMessage(
+    msg.chat.id,
+    removed
+      ? "❌ Unsubscribed successfully"
+      : "You were not subscribed"
+  );
 });
 
-/* ---------- Auto broadcaster ---------- */
+/* -------------------- START AUTO LOOP -------------------- */
 
-async function startAutoBroadcast() {
-  // First-run: wait AUTO_INTERVAL_MS then run repeatedly
-  console.log(`Auto broadcaster scheduled every ${AUTO_INTERVAL_MS / 60000} minutes.`);
+console.log(`⏰ Auto check every ${AUTO_INTERVAL_MS / 60000} minutes`);
 
-  // Optionally run immediately on startup:
-  // await broadcastNotices(5);
+setInterval(() => {
+  broadcastNewNotices(5).catch(console.error);
+}, AUTO_INTERVAL_MS);
 
-  setInterval(async () => {
-    try {
-      console.log("Auto-broadcast: fetching and sending notices to subscribers...");
-      await broadcastNotices(5);
-    } catch (err) {
-      console.error("Auto-broadcast failed:", err);
-    }
-  }, AUTO_INTERVAL_MS);
-}
-
-startAutoBroadcast();
