@@ -27,7 +27,8 @@ const LAST_FILE = path.join(process.cwd(), "last_notice.json");
 const bot = new TelegramBot(token, { polling: true });
 console.log("✅ Telegram bot started");
 
-/* -------------------- KEEP ALIVE (FREE RENDER FIX) -------------------- */
+const ADMIN_ID = 2021203936; 
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -211,11 +212,28 @@ bot.onText(/\/(?:notices|latest)(?:\s+(\d+))?/, async (msg, match) => {
 
 // /subscribe
 bot.onText(/\/subscribe/, async (msg) => {
+
   const chatId = msg.chat.id;
   const added = await addSubscriber(chatId);
 
   if (added) {
+
     await bot.sendMessage(chatId, "✅ Subscribed to auto notices");
+
+    // ⭐ ADMIN NOTIFICATION (added using your admin ID)
+    try {
+      await bot.sendMessage(
+        2021203936,
+`🆕 New Subscriber Joined
+
+👤 Name: ${msg.from.first_name || "Unknown"}
+📛 Username: @${msg.from.username || "N/A"}
+🆔 ChatID: ${chatId}`
+      );
+    } catch (err) {
+      console.log("Admin notification failed");
+    }
+
     try {
       const notices = await getNotices(5);
       let text = "";
@@ -224,10 +242,12 @@ bot.onText(/\/subscribe/, async (msg) => {
       });
       await bot.sendMessage(chatId, text);
     } catch {}
+
   } else {
     await bot.sendMessage(chatId, "You are already subscribed 👍");
   }
 });
+
 
 // /unsubscribe
 bot.onText(/\/unsubscribe/, async (msg) => {
@@ -240,6 +260,45 @@ bot.onText(/\/unsubscribe/, async (msg) => {
   );
 });
 
+// /subscribers (admin only)
+bot.onText(/\/subscribers/, async (msg) => {
+
+  if (msg.chat.id !== ADMIN_ID) {
+    return; // only admin allowed
+  }
+
+  const subs = await readSubscribers();
+
+  if (subs.length === 0) {
+    return bot.sendMessage(msg.chat.id, "👥 No subscribers yet.");
+  }
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `👥 Total subscribers: ${subs.length}\n\n${subs.join("\n")}`
+  );
+});
+
+// /stats (ADMIN ONLY)
+bot.onText(/\/stats/, async (msg) => {
+
+  const chatId = msg.chat.id;
+
+  if (chatId !== ADMIN_ID) return;
+
+  const subs = await readSubscribers();
+  const lastNotice = await getLastNotice();
+
+  await bot.sendMessage(
+    chatId,
+`📊 BOT STATS
+
+👥 Total subscribers: ${subs.length}
+📢 Last notice sent: ${lastNotice || "None yet"}`
+  );
+});
+
+
 /* -------------------- START AUTO LOOP -------------------- */
 
 console.log(`⏰ Auto check every ${AUTO_INTERVAL_MS / 60000} minutes`);
@@ -247,4 +306,5 @@ console.log(`⏰ Auto check every ${AUTO_INTERVAL_MS / 60000} minutes`);
 setInterval(() => {
   broadcastNewNotices(5).catch(console.error);
 }, AUTO_INTERVAL_MS);
+
 
