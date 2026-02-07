@@ -50,6 +50,9 @@ bot.setMyCommands([
   { command: "unsubscribe", description: "Stop auto notifications" },
   { command: "help", description: "Help info" },
   { command: "about", description: "About this bot" },
+  { command: "stats", description: "Admin stats" },
+  { command: "subscribers", description: "Admin subscriber list" },
+
 ]).catch(console.error);
 
 /* -------------------- FILE HELPERS -------------------- */
@@ -306,5 +309,6 @@ console.log(`⏰ Auto check every ${AUTO_INTERVAL_MS / 60000} minutes`);
 setInterval(() => {
   broadcastNewNotices(5).catch(console.error);
 }, AUTO_INTERVAL_MS);
+
 
 
